@@ -1,0 +1,96 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
+from sklearn.model_selection import train_test_split
+
+# ---------------------------
+# Step 1: This code below is used to Loading the Dataset
+# ---------------------------
+df = pd.read_csv(r"C:\Users\sumitp\OneDrive\Desktop\Deep Learning\Project 3 Spam filter for Quora questions\train.csv")
+texts = df['question_text'].astype(str).tolist()
+labels = df['target'].values
+
+# ---------------------------
+# Step 2: This code below is used to Text Tokenization
+# ---------------------------
+MAX_NUM_WORDS = 100000
+MAX_SEQUENCE_LENGTH = 100
+
+tokenizer = Tokenizer(num_words=MAX_NUM_WORDS)
+tokenizer.fit_on_texts(texts)
+sequences = tokenizer.texts_to_sequences(texts)
+
+word_index = tokenizer.word_index
+print(f"Found {len(word_index)} unique tokens.")
+
+data = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH)
+
+# ---------------------------
+# Step 3: This code below is used to Selectively Load the GloVe
+# ---------------------------
+EMBEDDING_DIM = 300  # or 100, depending on your GloVe file
+
+glove_path = r"C:\Users\sumitp\OneDrive\Desktop\Deep Learning\Project 3 Spam filter for Quora questions\glove.6B.300d.txt" # CHANGE to your actual file name
+embeddings_index = {}
+
+with open(glove_path, encoding='utf8') as f:
+    for line in f:
+        values = line.rstrip().split(' ')
+        word = values[0]
+        if word in word_index:
+            coefs = np.asarray(values[1:], dtype='float32')
+            embeddings_index[word] = coefs
+
+print(f"Loaded {len(embeddings_index)} word vectors from GloVe.")
+
+
+# ---------------------------
+# Step 4: This code below is used to Embedding Matrix is being created
+# ---------------------------
+num_words = min(MAX_NUM_WORDS, len(word_index) + 1)
+embedding_matrix = np.zeros((num_words, EMBEDDING_DIM))
+
+for word, i in word_index.items():
+    if i >= MAX_NUM_WORDS:
+        continue
+    embedding_vector = embeddings_index.get(word)
+    if embedding_vector is not None:
+        embedding_matrix[i] = embedding_vector
+
+# ---------------------------
+# Step 5: This code below is used to Split Train/Validation
+# ---------------------------
+X_train, X_val, y_train, y_val = train_test_split(
+    data, labels, test_size=0.2, random_state=42, stratify=labels
+)
+
+
+# ---------------------------
+# Step 6: LSTM Model Building
+# ---------------------------
+model = Sequential([
+    Embedding(num_words, EMBEDDING_DIM, weights=[embedding_matrix], input_length=MAX_SEQUENCE_LENGTH, trainable=False),
+    LSTM(64, return_sequences=False),
+    Dropout(0.5),
+    Dense(64, activation='relu'),
+    Dropout(0.3),
+    Dense(1, activation='sigmoid')
+])
+
+model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+model.summary()
+
+
+# ---------------------------
+# Step 7: Train Model
+# ---------------------------
+history = model.fit(
+    X_train, y_train,
+    batch_size=128,
+    epochs=5,
+    validation_data=(X_val, y_val)
+)
