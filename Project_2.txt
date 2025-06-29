@@ -1,0 +1,144 @@
+import os
+import tarfile
+import librosa
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader, random_split
+from sklearn.preprocessing import LabelEncoder
+
+# -----------------------------
+# 1. This code below is used to This Paths and Extraction
+# -----------------------------
+base_path = r"C:\Users\sumitp\OneDrive\Desktop\Deep Learning\Project 2  Music Genre Identification"
+tar_path = os.path.join(base_path, "genres.tar")
+extract_path = os.path.join(base_path, "genres", "genres")  # where the subfolders are
+
+if not os.path.exists(extract_path):
+    with tarfile.open(tar_path, "r") as tar:
+        tar.extractall(path=base_path)
+    print("Extraction complete.")
+else:
+    print("Data already extracted.")
+
+# -----------------------------
+# 2. This code below is used to Convert audio to mel spectrogram
+# -----------------------------
+def extract_mel_spectrogram(file_path, n_mels=128):
+    y, sr = librosa.load(file_path, sr=None)
+    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels)
+    mel_db = librosa.power_to_db(mel, ref=np.max)
+    return mel_db
+
+# -----------------------------
+# 3. This code below is used to Custom PyTorch Dataset
+# -----------------------------
+class GenreDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.samples = []
+        self.labels = []
+        self.transform = transform
+
+        genres = os.listdir(root_dir)
+        for genre in genres:
+            genre_dir = os.path.join(root_dir, genre)
+            if not os.path.isdir(genre_dir):
+                continue
+            for filename in os.listdir(genre_dir):
+                if filename.endswith(".au"):
+                    path = os.path.join(genre_dir, filename)
+                    self.samples.append(path)
+                    self.labels.append(genre)
+
+        self.encoder = LabelEncoder()
+        self.labels = self.encoder.fit_transform(self.labels)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        mel = extract_mel_spectrogram(self.samples[idx])
+        mel = mel[:, :640]  # Crop/pad to fixed size for consistency
+        mel = np.expand_dims(mel, axis=0)  # (1, H, W)
+        mel_tensor = torch.tensor(mel, dtype=torch.float32)
+        label = torch.tensor(self.labels[idx], dtype=torch.long)
+
+        if self.transform:
+            mel_tensor = self.transform(mel_tensor)
+
+        return mel_tensor, label
+
+# -----------------------------
+# 4. This code below is used to Dataset and DataLoaders
+# -----------------------------
+dataset = GenreDataset(extract_path)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=16)
+
+# -----------------------------
+# 5. This code below is used to CNN Model
+# -----------------------------
+class GenreCNN(nn.Module):
+    def __init__(self, num_classes):
+        super(GenreCNN, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(64 * 16 * 80, 128),  # Based on mel shape (128x640) → after pooling 3 times: 16x80
+            nn.ReLU(),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# -----------------------------
+# 6. This code below is used to Setup and Training Functions
+# -----------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = GenreCNN(num_classes=10)
+model.to(device)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+def train_model(epochs=15):
+    model.train()
+    for epoch in range(epochs):
+        total_loss = 0
+        for inputs, targets in train_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f"Epoch {epoch+1}: Loss = {total_loss / len(train_loader):.4f}")
+
+# -----------------------------
+# 7. This code below is used to Evaluation Function
+# -----------------------------
+def evaluate_model():
+    model.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for inputs, targets in val_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == targets).sum().item()
+            total += targets.size(0)
+    print(f"Validation Accuracy: {100 * correct / total:.2f}%")
+
+# -----------------------------
+# 8. This code below is used to Run Training and Evaluation
+# -----------------------------
+train_model(epochs=15)
+evaluate_model()
