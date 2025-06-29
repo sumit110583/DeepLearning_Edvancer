@@ -1,0 +1,137 @@
+import os
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
+import torchvision.models as models
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from collections import defaultdict
+import numpy as np
+
+# -----------------------------
+# 1. This code below is used to Load Expert Annotations
+# -----------------------------
+def load_expert_ids(file_path, threshold=3.0):
+    ids = set()
+    with open(file_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            avg_score = sum(map(int, parts[2:5])) / 3.0
+            if avg_score >= threshold:
+                ids.add(parts[1])
+    return ids
+
+# -----------------------------
+# 2. This code below is used to Load Captions
+# -----------------------------
+def load_captions(file_path, allowed_ids=None):
+    data = defaultdict(list)
+    with open(file_path, 'r') as f:
+        for line in f:
+            image_caption_id, caption = line.strip().split('\t')
+            image_id, cap_id = image_caption_id.split('#')
+            if allowed_ids and image_caption_id not in allowed_ids:
+                continue
+            data[image_id].append(caption.lower())
+    return data
+
+# -----------------------------
+# 3. This code below is used to Vocabulary Builder
+# -----------------------------
+def build_vocab(captions_dict):
+    tokens = set()
+    for caps in captions_dict.values():
+        for cap in caps:
+            tokens.update(cap.split())
+    word2idx = {word: idx + 1 for idx, word in enumerate(sorted(tokens))}
+    word2idx['<pad>'] = 0
+    word2idx['<start>'] = len(word2idx)
+    word2idx['<end>'] = len(word2idx)
+    return word2idx
+
+# -----------------------------
+# 4. This code below is used to Flickr Dataset
+# -----------------------------
+class FlickrDataset(Dataset):
+    def __init__(self, image_dir, captions_dict, vocab, transform):
+        self.image_dir = image_dir
+        self.vocab = vocab
+        self.transform = transform
+        self.images = []
+        self.captions = []
+
+        for img, caps in captions_dict.items():
+            for cap in caps:
+                self.images.append(img)
+                self.captions.append(cap)
+
+    def __len__(self):
+        return len(self.captions)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.image_dir, self.images[idx])
+        image = Image.open(img_path).convert("RGB")
+        image = self.transform(image)
+
+        tokens = ['<start>'] + self.captions[idx].split() + ['<end>']
+        token_ids = [self.vocab.get(w, 0) for w in tokens]
+        return image, torch.tensor(token_ids)
+
+# -----------------------------
+# 5. This code below is used to CNN Encoder
+# -----------------------------
+class EncoderCNN(nn.Module):
+    def __init__(self, embed_size):
+        super(EncoderCNN, self).__init__()
+        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        modules = list(resnet.children())[:-1]
+        self.resnet = nn.Sequential(*modules)
+        self.linear = nn.Linear(resnet.fc.in_features, embed_size)
+        self.bn = nn.BatchNorm1d(embed_size)
+
+    def forward(self, images):
+        with torch.no_grad():
+            features = self.resnet(images).squeeze()
+        features = self.linear(features)
+        features = self.bn(features)
+        return features
+
+# -----------------------------
+# 6. This code below is used to LSTM Decoder
+# -----------------------------
+class DecoderRNN(nn.Module):
+    def __init__(self, embed_size, hidden_size, vocab_size):
+        super(DecoderRNN, self).__init__()
+        self.embed = nn.Embedding(vocab_size, embed_size)
+        self.lstm = nn.LSTM(embed_size, hidden_size, batch_first=True)
+        self.linear = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, features, captions):
+        embeddings = self.embed(captions)
+        inputs = torch.cat((features.unsqueeze(1), embeddings), 1)
+        hiddens, _ = self.lstm(inputs)
+        outputs = self.linear(hiddens)
+        return outputs
+
+# -----------------------------
+# 7. This code below is used to Entry Point for Dataset Loading
+# -----------------------------
+if __name__ == '__main__':
+    text_folder = 'C:\\Users\\sumitp\\OneDrive\\Desktop\\Deep Learning\\Project 5  Image Captioning\\Flickr8k_text\\'
+    image_folder = 'C:\\Users\\sumitp\\OneDrive\\Desktop\\Deep Learning\\Project 5  Image Captioning\\Flicker8k_Dataset\\'
+
+    expert_ids = load_expert_ids(os.path.join(text_folder, 'ExpertAnnotations.txt'), threshold=3)
+    captions_dict = load_captions(os.path.join(text_folder, 'Flickr8k.token.txt'), expert_ids)
+    vocab = build_vocab(captions_dict)
+
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+
+    dataset = FlickrDataset(image_folder, captions_dict, vocab, transform)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=lambda x: list(zip(*x)))
+
+    print(f"Loaded {len(dataset)} samples with vocab size {len(vocab)}")
